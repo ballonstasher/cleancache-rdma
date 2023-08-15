@@ -85,6 +85,7 @@ af_upsert(access_filter_t *af, ino_t ino, pgoff_t index)
 		else
 			ret = 1;
 	} else {
+		/* collision evict */
 		bucket->ino = ino;
 		ret = 1;
 

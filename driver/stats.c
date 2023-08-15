@@ -5,7 +5,6 @@
 struct dcc_stats_t dcc_stats = {};
 
 const char *dcc_stats_names[] = {
-	"repl_puts",
 	"blocked_puts",
 	"rejected_puts",
 	"clean_puts",

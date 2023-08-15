@@ -3,9 +3,11 @@
 #include "worker.h"
 #include "backend.h"
 #include "rdma.h"
+#include "rdma_stats.h"
 
 static bool filter_update_done = false;
 extern int filter_update_interval;
+extern bool g_steering_to_mn;
 
 void do_update_filter(void *arg) 
 {
@@ -52,6 +54,27 @@ int dcc_backend_update_filter(struct dcc_rdma_ctrl *ctrl)
 	return 0;
 }
 
+void do_mointor_steering(void *arg) 
+{
+        struct dcc_worker_arg *my_arg = (struct dcc_worker_arg *) arg;
+        struct completion *comp = my_arg->comp;
+        
+        while (!kthread_should_stop()) {
+                if (dcc_rdma_stats_get(STEERING_TO_MN)) {
+                        g_steering_to_mn = true;        
+                } else {
+                        g_steering_to_mn = false; 
+                }
+                //pr_err("steering_to_mn=%d", g_steering_to_mn);
+
+                if (kthread_should_stop()) /* disconnected state */
+                        goto out;
+                
+                ssleep(5);
+        }
+out: 
+        complete(comp);
+}
 
 struct dcc_worker *dcc_start_worker(struct dcc_backend *backend, 
 		struct dcc_rdma_ctrl *ctrl, int (*threadfn)(void *data),

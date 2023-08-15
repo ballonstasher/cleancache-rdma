@@ -3,8 +3,8 @@
 MODULE_NAME_LIST="
 dcc
 rdma_backend
-rdma_bench
 "
+#rdma_bench
 
 for MODULE_NAME in $MODULE_NAME_LIST;
 do

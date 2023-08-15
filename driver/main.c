@@ -15,9 +15,7 @@
 #include "backend.h"
 #include "stats.h"
 #include "breakdown.h"
-
-extern void dcc_debugfs_init(void);
-extern void dcc_debugfs_exit(void);
+#include "debugfs.h"
 
 /* Cleancache operations implementation */
 static void dcc_put_page(int pool_id, struct cleancache_filekey key,
@@ -46,6 +44,12 @@ static void dcc_put_page(int pool_id, struct cleancache_filekey key,
 			break;
 		case -5:
 			dcc_stats_inc(ACCESS_FILTERED_PUTS);
+			break;
+		case -6:
+			dcc_stats_inc(BLOCKED_PUTS);
+			break;
+		case -7:
+			dcc_stats_inc(REJECTED_PUTS);
 			break;
 	}
 	/* acutal puts: puts - clean_puts */
@@ -162,4 +166,5 @@ module_init(dcc_init);
 module_exit(dcc_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("");
 MODULE_DESCRIPTION("Cleancache backend driver");

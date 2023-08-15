@@ -4,7 +4,6 @@
 #include <linux/types.h>
 
 enum dcc_stats_type {
-	REPL_PUTS,
 	BLOCKED_PUTS,
 	REJECTED_PUTS,
 	CLEAN_PUTS,

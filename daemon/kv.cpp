@@ -135,12 +135,25 @@ RETRY:
             //throw std::runtime_error("KV::key is duplicated");
         }
         /* case2: duplicated key */
-        if (ret)
-            throw std::runtime_error("dup key but ret > 0");
-
         pool->Free(ev_value, cid, -1);
-        stats->Inc(KV_UPDATED_PUT, cpu_id);
-        goto RETRY;
+        if (0) {
+            if (config.cbf_on) /* remove dup key from cbf */
+                cbfs[cid]->Remove(key);
+
+            stats->Inc(KV_UPDATED_PUT, cpu_id);
+            goto RETRY;
+        } else {
+            /* 
+             * XXX: cannot trust duplicated key (this is bug due to send buffer)
+             * old kv can be admitted 
+             * for data consistency, just give up current put
+             */
+            pool->Free(value, cid, -1);
+            if (config.cbf_on) /* remove dup key from cbf */
+                cbfs[cid]->Remove(key);
+
+            return; 
+        }
     }
 
     if (!ret) {

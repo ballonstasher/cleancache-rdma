@@ -8,9 +8,10 @@ typedef size_t Key_t;
 typedef void *Value_t;
 
 enum key_const {
-    INVALID    = 0xffffffffffffffff, // 11..11111111
-    SENTINEL   = 0xfffffffffffffffe, // 11..11111110 
-    TOMBSTONE  = 0xfffffffffffffffc, // 11..11111100
+    INVALID    = (uint64_t) -1,
+    SENTINEL   = (uint64_t) -2,
+    TOMBSTONE  = (uint64_t) -3,
+    BYPASS     = (uint64_t) -4,
 
     INVALID32    = 0xffffffff, // 11..11111111 (32bit)
 };

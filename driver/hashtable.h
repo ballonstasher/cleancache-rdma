@@ -12,8 +12,6 @@ typedef struct ht_node_t {
 
 typedef struct hashtable_t {
 	size_t num_buckets;
-	size_t lock_size;
-	int num_locks;
 	rwlock_t *rw_locks;
 	struct hlist_head *hlistheads;
 } hashtable_t;
@@ -22,6 +20,7 @@ typedef struct hashtable_t {
 
 hashtable_t *hashtable_init(size_t);
 void hashtable_exit(hashtable_t *);
+bool hashtable_update(hashtable_t *ht, u64 key, u64 value);
 void hashtable_insert(hashtable_t *, u64, u64);
 u64 hashtable_get(hashtable_t *, u64);
 u64 hashtable_remove(hashtable_t *, u64);
