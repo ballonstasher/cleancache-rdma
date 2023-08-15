@@ -13,7 +13,6 @@ struct mm_info {
     uint32_t key;
     uint32_t len;       // 16 B 
     uint32_t cli_id;    // 20 B
-    uint32_t info[3];   // 32 B
 };
 
 struct mm_region {
@@ -39,22 +38,9 @@ class RdmaMem {
         struct mm_pool *GetDataMMPool() {
             return &data_mm_pool;
         }
-        struct mm_pool *GetMetaMMPool() {
-            return &meta_mm_pool;
-        }
-        struct mm_pool *GetFilterMMPool() {
-            return &filter_mm_pool;
-        }
-        struct mm_region *GetClientMR() {
-            return &client_mr;
-        }
         
     private:
         struct mm_pool data_mm_pool;
-        struct mm_pool meta_mm_pool;
-        struct mm_pool filter_mm_pool;
-        
-        struct mm_region client_mr; // client's filter region
 };
 
 #endif // __RDMA_MEM_HPP__

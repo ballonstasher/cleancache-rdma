@@ -3,7 +3,7 @@
 
 #include <cinttypes>
 
-//#define DCC_CRC_CHECK
+#define DCC_CRC_CHECK
 
 #define CRC8_NUM_CHECK 16
 

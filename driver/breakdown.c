@@ -5,15 +5,18 @@ EXPORT_SYMBOL_GPL(dcc_breakdown);
 
 const char *dcc_breakdown_names[] = {
 	"br_puts",
+	"br_puts_index",
+	"br_puts_pool",
+	"br_puts_comm",
+
 	"br_gets",
+	"br_gets_index",
+	"br_gets_pool",
+	"br_gets_comm",
+
 	"br_invs",
-#if 0
-	"br_meta_puts",
-	"br_meta_gets",
-	"br_meta_invs",
-#endif
-	"br_comm_puts",
-	"br_comm_gets",
-	"br_comm_invs"
+	"br_invs_index",
+	"br_invs_pool",
+	"br_invs_comm",
 };
 EXPORT_SYMBOL_GPL(dcc_breakdown_names);

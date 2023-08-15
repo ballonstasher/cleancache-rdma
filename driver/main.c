@@ -47,12 +47,6 @@ static void dcc_put_page(int pool_id, struct cleancache_filekey key,
 		case -5:
 			dcc_stats_inc(ACCESS_FILTERED_PUTS);
 			break;
-		case -6:
-			dcc_stats_inc(BLOCKED_PUTS);
-			break;
-		case -7:
-			dcc_stats_inc(REJECTED_PUTS);
-			break;
 	}
 	/* acutal puts: puts - clean_puts */
 }
@@ -168,5 +162,4 @@ module_init(dcc_init);
 module_exit(dcc_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("");
 MODULE_DESCRIPTION("Cleancache backend driver");

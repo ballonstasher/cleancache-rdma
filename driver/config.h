@@ -11,11 +11,7 @@ struct dcc_config_t {
 	int svr_port;
 	int num_svrs;
 	bool exclusive_policy;
-	int metadata_type;
-	int filter_update_interval;
-	bool af_enable;
 };
-
 extern struct dcc_config_t config;
 
 #endif // __CONFIG_H__

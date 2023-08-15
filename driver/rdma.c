@@ -2,15 +2,8 @@
 #include <linux/cpumask.h>
 
 #include "rdma.h"
-#include "backend.h"
+#include "config.h"
 #include "util/crc8.h"
-
-struct dcc_rdma_ctrl **ctrls;
-struct kmem_cache *req_cache;
-struct dcc_rdma_config_t rdma_config;
-
-extern int dcc_backend_init(int, struct dcc_rdma_ctrl *); 
-extern int dcc_backend_update_filter(struct dcc_rdma_ctrl *); 
 
 //#define DCC_RDMA_DEBUG
 #ifdef DCC_RDMA_DEBUG
@@ -19,6 +12,12 @@ extern int dcc_backend_update_filter(struct dcc_rdma_ctrl *);
 #else
 #define dcc_rdma_debug(fmt, ...)     do {} while (0)
 #endif
+
+struct dcc_rdma_ctrl **ctrls;
+struct kmem_cache *req_cache;
+struct dcc_rdma_config_t rdma_config;
+
+extern int dcc_backend_init(int, struct dcc_rdma_ctrl *); 
 
 static inline void poll_send_cq(struct rdma_queue *q) 
 {
@@ -29,310 +28,101 @@ static inline void poll_send_cq(struct rdma_queue *q)
 static inline int poll_recv_cq(struct rdma_queue *q, int *etc, int *crc)
 {
 	struct ib_wc wc = {};
-	int ret;
-	int mid, msg_type, tx_state;
-	
 	__poll_cq(&wc, q->qp->recv_cq);
-	
-	if (!wc.ex.imm_data)
-		return 0;
-
-	bit_unmask(ntohl(wc.ex.imm_data), &mid, &msg_type, &tx_state, 
-			etc, crc);
-
-	switch (tx_state) {
-		case TX_WRITE_COMMITTED:
-		case TX_INV_PAGE_COMMITED:
-			ret = 0;
-			break;
-		case TX_READ_COMMITTED:
-			ret = 0;
-			break;
-		case TX_READ_ABORTED:
-		case TX_INV_PAGE_ABORTED:
-			ret = 1;
-			break;
-		default:
-			pr_err("Unknown tx_state: %d", tx_state);
-			ret = -1;
-	}
-
-	return ret;
+	return 0;
 }
 
-void send_page_work_handler(struct work_struct *work)
+/* per-cpu qp doesn't have to lock for one-sided read/write */
+int dcc_rdma_write_page(struct dcc_rdma_ctrl *ctrl, struct page *page, u64 key, 
+		u64 roffset)
 {
-	struct work_data *data = (struct work_data *) work;
-	struct rdma_queue *q = data->q;
-	struct dcc_rdma_ctrl *ctrl = q->ctrl;
-	struct ib_sge *sges;
-	struct ib_rdma_wr *rdma_wrs;
-	const struct ib_send_wr *bad_wr;
-	int msg_id = data->msg_id;
+	//int cpu_id = smp_processor_id();
 	int ret;
-	int etc = 0;
-	int i;
-	u32 imm;
-	
-	sges = kzalloc(sizeof(struct ib_sge) * rdma_config.num_put_batch, 
-			GFP_ATOMIC);
-	rdma_wrs = kzalloc(sizeof(struct ib_rdma_wr) * rdma_config.num_put_batch, 
-			GFP_ATOMIC);
-
-	for (i = 0; i < rdma_config.num_put_batch; i++) {
-		size_t len = sizeof(u64) + PAGE_SIZE;
-		int sending_msg_id = msg_id - (rdma_config.num_put_batch - 1) + i;
-
-		/* setup imm data */
-		imm = htonl(bit_mask(sending_msg_id, MSG_WRITE, TX_WRITE_BEGIN, 
-					0, 0));
-
-		sges[i].addr   = KEYPAGE_MM_POOL(ctrl).dma_addr + 
-			len * sending_msg_id;
-		sges[i].length = len;
-		sges[i].lkey   = ctrl->rdev->pd->local_dma_lkey;
-
-		rdma_wrs[i].wr.next        = i < (rdma_config.num_put_batch - 1) ? 
-			&rdma_wrs[i + 1].wr : NULL;
-		rdma_wrs[i].wr.wr_id       = 0;
-		rdma_wrs[i].wr.sg_list     = &sges[i];
-		rdma_wrs[i].wr.num_sge     = 1;
-		rdma_wrs[i].wr.opcode      = IB_WR_SEND_WITH_IMM;
-		rdma_wrs[i].wr.send_flags  = i < (rdma_config.num_put_batch - 1) ? 
-			0 : IB_SEND_SIGNALED;
-		rdma_wrs[i].wr.ex.imm_data = imm;
-	}
-
-	mutex_lock(&q->mtx);
-	
-	ret = ib_post_send(q->qp, &rdma_wrs[0].wr, &bad_wr);
-	if (unlikely(ret))
-		pr_err("%s: ib_post_send failed: %d", __func__, ret);
-
-	poll_send_cq(q);
-
-	clear_bit(msg_id / rdma_config.num_put_batch, &ctrl->wait);
-
-	if (msg_id == rdma_config.num_msgs - 1) { 
-		ret = poll_recv_cq(q, &etc, NULL);
-		post_recv(q, 0, 0);
-	}
-	
-	mutex_unlock(&q->mtx);
-
-	kfree(sges);
-	kfree(rdma_wrs);
-
-	kfree(data);
-}
-
-/* (Page, key) (Page, key) */
-static inline void copy_to_send_buffer(struct dcc_rdma_ctrl *ctrl, u64 key, 
-		struct page *page, int msg_id) 
-{
-	u64 off = msg_id * (PAGE_SIZE + sizeof(u64));
-	u64 page_loc = (u64) KEYPAGE_MM_POOL(ctrl).ptr + off;
-	u64 key_loc = page_loc + PAGE_SIZE;
-	
-	memcpy((void *) page_loc, page_address(page), PAGE_SIZE);
-	memcpy((void *) key_loc, &key, sizeof(u64));
-}
-
-int dcc_rdma_send_page(struct dcc_rdma_ctrl *ctrl, struct page *page, u64 key)
-{
-	int queue_id, msg_id;
-	int ret = 0;
-	struct rdma_queue *q;
-	int num_msgs = rdma_config.num_msgs;
-	unsigned long flags;
-	struct work_data *data;
-	int num_retry = 0;
-
-	q = get_rdma_queue(ctrl, 0);
-	queue_id = q->id;
-
-	spin_lock_irqsave(&q->lock, flags);
-
-	msg_id = q->msg_id++ % num_msgs;
-	
-	while (test_bit(msg_id / rdma_config.num_put_batch, &ctrl->wait)) {
-		//pr_info("key=%llu, msg_id=%d wait!!", key, msg_id);
-		if (num_retry++ > 5) { 
-			q->msg_id--;
-			spin_unlock_irqrestore(&q->lock, flags);
-			return -6;
-		}
-		udelay(1);
-	}
-
-	copy_to_send_buffer(ctrl, key, page, msg_id);
-
-	if (msg_id % rdma_config.num_put_batch != 
-			rdma_config.num_put_batch - 1) {
-		spin_unlock_irqrestore(&q->lock, flags);
-		return 0;
-	}
-	
-	data = kmalloc(sizeof(struct work_data), GFP_ATOMIC);
-	INIT_WORK(&data->work, send_page_work_handler);
-	data->q = q;
-	data->msg_id = msg_id;
-
-	set_bit(msg_id / rdma_config.num_put_batch, &ctrl->wait);
-
-	spin_unlock_irqrestore(&q->lock, flags);
-
-	if (!schedule_work(&data->work))
-		pr_err("%s: failed to schedule_work", __func__);
-	
-	return ret;
-}
-
-/* for get_page2 */
-int dcc_rdma_write_msg(struct dcc_rdma_ctrl *ctrl, struct page *page, u64 key)
-{
-	int msg_id = 0;
-	int ret;
-	struct dcc_metadata meta = {};
-	u32 imm;
 	struct rdma_req *req;
 	struct rdma_queue *q;
 	struct ib_sge sge = {};
 	struct ib_rdma_wr rdma_wr = {};
 	const struct ib_send_wr *bad_wr;
 	struct rdma_dev *rdev = ctrl->rdev; 
-	int msg_type = MSG_READ;
-	int tx_type = TX_READ_BEGIN;
-	int crc;
 	unsigned long flags;
 
-	/* 0: put, 1: inv, 2 ~ N: get */
-#if 1
-	q = get_rdma_queue(ctrl, smp_processor_id() % rdma_config.num_get_qps + 2);
-#else
-	q = get_rdma_queue(ctrl, key % rdma_config.num_get_qps + 2);
-#endif
-	/* DMA PAGE */
-	ret = get_req_for_page(&req, rdev->dev, page, DMA_FROM_DEVICE);
+	q = get_rdma_queue(ctrl, 0);
+
+	ret = get_req_for_page(&req, rdev->dev, page, DMA_TO_DEVICE);
 	if (unlikely(ret)) {
 		pr_err("get_req_for_page failed: %d", ret);
 	}
 
-	/* set metadata */
-	meta.key = key;
-	meta.raddr = req->dma;
-
-	/* setup imm data */
-	imm = htonl(bit_mask(msg_id, msg_type, tx_type, 0, 0));
-
-	/* request (key, raddr) */
-	sge.addr   = (u64) &meta;
-	sge.length = sizeof(struct dcc_metadata);
+	sge.addr   = req->dma;
+	sge.length = PAGE_SIZE;
 	sge.lkey   = rdev->pd->local_dma_lkey;
 
-	rdma_wr.wr.next        = NULL;
-	rdma_wr.wr.wr_id       = 0;
-	rdma_wr.wr.sg_list     = &sge;
-	rdma_wr.wr.num_sge     = 1;
-	rdma_wr.wr.opcode      = IB_WR_RDMA_WRITE_WITH_IMM;
+	rdma_wr.wr.next       = NULL;
+	rdma_wr.wr.wr_id      = 0;
+	rdma_wr.wr.sg_list    = &sge;
+	rdma_wr.wr.num_sge    = 1;
+	rdma_wr.wr.opcode     = IB_WR_RDMA_WRITE;
+	rdma_wr.wr.send_flags = IB_SEND_SIGNALED;
+	rdma_wr.remote_addr   = SVR_MM_INFO(ctrl).baseaddr + roffset; 
+	rdma_wr.rkey          = SVR_MM_INFO(ctrl).key;
 
-	rdma_wr.wr.send_flags  = IB_SEND_SIGNALED | IB_SEND_INLINE;
-	rdma_wr.wr.ex.imm_data = imm;
-	rdma_wr.remote_addr    = SVR_MM_INFO(ctrl).baseaddr + 
-		GET_METADATA_OFFSET(q->id, msg_id, msg_type);
-	rdma_wr.rkey           = SVR_MM_INFO(ctrl).key;
-
-	//mutex_lock(&q->mtx);
 	spin_lock_irqsave(&q->lock, flags);
-
-	/* to keep key order with invalidation */
-	//while (hashtable_get(ctrl->ht, key) == key) { }
-
-	/* request => reply */
 	ret = ib_post_send(q->qp, &rdma_wr.wr, &bad_wr);
 	if (unlikely(ret)) {
-		pr_err("ib_post_send failed: %d", ret);
+		pr_err("%s: ib_post_send failed: %d", __func__, ret);
 	}
 	poll_send_cq(q);
-	
-	ret = poll_recv_cq(q, NULL, &crc);
-	
-	//mutex_unlock(&q->mtx);
 	spin_unlock_irqrestore(&q->lock, flags);
 
-	post_recv(q, 0, 0);
-
-	if (!ret && ((uint8_t) crc != CRC8(page_address(page)))) {
-		ret = -4;
-	}
-	
-	ib_dma_unmap_page(rdev->dev, req->dma, PAGE_SIZE,
-			DMA_FROM_DEVICE);
+	ib_dma_unmap_page(rdev->dev, req->dma, PAGE_SIZE, DMA_TO_DEVICE);
 	kmem_cache_free(req_cache, req);
 
-	dcc_rdma_debug("key=%llu, qid=%d, ret=%d", key, queue_id, ret);
-	
 	return ret;
 }
 
-/* for inv_page2 */
-int dcc_rdma_write_msg2(struct dcc_rdma_ctrl *ctrl, struct page *page, u64 key)
+int dcc_rdma_read_page(struct dcc_rdma_ctrl *ctrl, struct page *page, u64 key, 
+		u64 roffset)
 {
-	int msg_id;
+	int cpu_id = smp_processor_id();
 	int ret;
-	u32 imm;
+	struct rdma_req *req;
 	struct rdma_queue *q;
 	struct ib_sge sge = {};
 	struct ib_rdma_wr rdma_wr = {};
 	const struct ib_send_wr *bad_wr;
 	struct rdma_dev *rdev = ctrl->rdev; 
-	int num_msgs = rdma_config.num_msgs;
 	unsigned long flags;
 
-	q = get_rdma_queue(ctrl, 1);
-
-	//hashtable_insert(ctrl->ht, key, key);
+	q = get_rdma_queue(ctrl, cpu_id % (rdma_config.num_data_qps - 1) + 1);
 	
-	/* request (key, raddr) */
-	sge.addr   = (u64) &key;
-	sge.length = sizeof(u64);
+	ret = get_req_for_page(&req, rdev->dev, page, DMA_FROM_DEVICE);
+	if (unlikely(ret)) {
+		pr_err("get_req_for_page failed: %d", ret);
+	}
+
+	sge.addr   = (u64)req->dma;
+	sge.length = PAGE_SIZE;
 	sge.lkey   = rdev->pd->local_dma_lkey;
 
 	rdma_wr.wr.next        = NULL;
 	rdma_wr.wr.wr_id       = 0;
 	rdma_wr.wr.sg_list     = &sge;
 	rdma_wr.wr.num_sge     = 1;
-	rdma_wr.wr.opcode      = IB_WR_RDMA_WRITE_WITH_IMM;
-	
-	spin_lock_irqsave(&q->lock, flags);
-	msg_id = q->msg_id++ % num_msgs;
-	/* setup imm data */
-	imm = htonl(bit_mask(msg_id, MSG_INV_PAGE, TX_INV_PAGE_BEGIN, 0, 0));
-	rdma_wr.wr.ex.imm_data = imm;
-	rdma_wr.wr.send_flags  = msg_id < num_msgs - 1 ? 
-		IB_SEND_INLINE : IB_SEND_SIGNALED | IB_SEND_INLINE;
-	rdma_wr.remote_addr    = SVR_MM_INFO(ctrl).baseaddr + 
-		GET_METADATA_OFFSET(q->id, msg_id, MSG_INV_PAGE);
+	rdma_wr.wr.opcode      = IB_WR_RDMA_READ;
+	rdma_wr.wr.send_flags  = IB_SEND_SIGNALED;
+	rdma_wr.remote_addr    = SVR_MM_INFO(ctrl).baseaddr + roffset;
 	rdma_wr.rkey           = SVR_MM_INFO(ctrl).key;
 
-	/* request => reply */
+	spin_lock_irqsave(&q->lock, flags);
 	ret = ib_post_send(q->qp, &rdma_wr.wr, &bad_wr);
 	if (unlikely(ret)) {
-		pr_err("ib_post_send failed: %d", ret);
+		pr_err("%s: ib_post_send failed: %d", __func__, ret);
 	}
+	poll_send_cq(q);
+	spin_unlock_irqrestore(&q->lock, flags);
 
-	if (msg_id < num_msgs - 1) {
-		spin_unlock_irqrestore(&q->lock, flags);
-	} else {
-		poll_send_cq(q);
-		ret = poll_recv_cq(q, NULL, NULL);
-		spin_unlock_irqrestore(&q->lock, flags);
-		post_recv(q, 0, 0);
-	}
-
-	//hashtable_remove(q->ctrl->ht, key);
-
-	dcc_rdma_debug("key=%llu, qid=%d, ret=%d", key, q->id, ret);
+	ib_dma_unmap_page(rdev->dev, req->dma, PAGE_SIZE, DMA_FROM_DEVICE);
+	kmem_cache_free(req_cache, req);
 
 	return ret;
 }
@@ -365,66 +155,6 @@ int dcc_rdma_send_msg(struct rdma_queue *q, u64 addr, u32 bufsize, u32 imm)
 	return ret;
 }
 
-static inline void process_send(struct ib_wc *wc) 
-{
-	//pr_err("%s", __func__);
-}
-
-/* Update client BF */
-static inline void process_imm(struct rdma_queue *q, struct ib_wc *wc) {
-	switch (wc->ex.imm_data) {
-		case FILTER_UPDATE_END:
-			dcc_backend_update_filter(q->ctrl);
-			break;
-		default:
-			pr_err("Unknown imm: %d", wc->ex.imm_data);
-	}
-}
-
-static void filter_event_handler(struct ib_cq *cq, void *arg) {
-	struct rdma_queue *q = (struct rdma_queue *)arg;
-	struct ib_wc wc = {};
-	int ret, err;
-
-retry:
-	while ((ret = ib_poll_cq(q->event_cq, 1, &wc)) > 0) {
-		//pr_err("%s", __func__);
-		if (wc.status) {
-			pr_err("%s: failed status %s(%d) for wr_id %llu", 
-					__func__, ib_wc_status_msg(wc.status), 
-					wc.status, wc.wr_id);
-			goto error;
-		}
-
-		switch (wc.opcode) {
-			case IB_WC_RDMA_WRITE:
-			case IB_WC_SEND:
-				process_send(&wc);
-				break;
-			case IB_WC_RECV:
-			case IB_WC_RECV_RDMA_WITH_IMM:
-				process_imm(q, &wc);
-				post_recv(q, 0, 0);
-				break;
-			default:
-				pr_err("Unexpected opcode %d, Shutting down", 
-						wc.opcode);
-				goto error;	/* TODO for rmmod */
-			//wake_up_interruptible(&cb->sem);
-			//ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
-		}
-	}
-
-	err = ib_req_notify_cq(q->event_cq, 
-			IB_CQ_NEXT_COMP | IB_CQ_REPORT_MISSED_EVENTS);
-	BUG_ON(err < 0);
-	if (err > 0)
-		goto retry;
-
-error:
-	return;
-}
-
 /************************* Setup rdma connection *************************/
 
 static int dcc_rdma_recv_remotemr(struct dcc_rdma_ctrl *ctrl)
@@ -453,30 +183,10 @@ static int dcc_rdma_recv_remotemr(struct dcc_rdma_ctrl *ctrl)
 	pr_info("server_mm_info addr=0x%llx, key=%u, len=%u", 
 			server_mm_info->baseaddr, server_mm_info->key,
 			server_mm_info->len);
-	pr_info("server_mm_info num_hash=%u, num_bits=%u, num_rmem_pages=%u", 
-			server_mm_info->info[0], server_mm_info->info[1], 
-			server_mm_info->info[2]);
 
 out_free_req:
 	kmem_cache_free(req_cache, req);
 out:
-	return ret;
-}
-
-static int dcc_rdma_send_localmr(struct dcc_rdma_ctrl *ctrl) 
-{
-	int ret;
-	struct mm_info *filter_mm_info = &FILTER_MM_INFO(ctrl);
-
-	ret = dcc_rdma_send_msg(&ctrl->queues[0], (u64) filter_mm_info, 
-			sizeof(struct mm_info), 0);
-	/* this delay doesn't really matter, only happens once */
-	poll_send_cq(&ctrl->queues[0]);
-
-	pr_info("filter_mm_info addr=0x%llx, len=%u, key=%u", 
-			filter_mm_info->baseaddr, 
-			filter_mm_info->len, filter_mm_info->key);
-
 	return ret;
 }
 
@@ -541,34 +251,13 @@ static int dcc_rdma_create_qp(struct rdma_queue *q)
 	int ret;
 
 	/* TODO: allocation failure handling */
-	if (q->id < rdma_config.num_data_qps) {
-		q->send_cq = ib_alloc_cq(ibdev, q, CQ_NUM_CQES, 0, 
-				IB_POLL_DIRECT);
-		q->recv_cq = ib_alloc_cq(ibdev, q, CQ_NUM_CQES, 0, 
-				IB_POLL_DIRECT);
-		
-		init_attr.send_cq = q->send_cq; 
-		init_attr.recv_cq = q->recv_cq;
-	} else {
-		struct ib_cq_init_attr cq_init_attr = { 
-			.cqe = CQ_NUM_CQES,
-			.comp_vector = 0
-		};
+	q->send_cq = ib_alloc_cq(ibdev, q, CQ_NUM_CQES, 0, 
+			IB_POLL_DIRECT);
+	q->recv_cq = ib_alloc_cq(ibdev, q, CQ_NUM_CQES, 0, 
+			IB_POLL_DIRECT);
 
-		q->event_cq = ib_create_cq(ibdev, filter_event_handler, NULL,
-				q, &cq_init_attr);
-		if (IS_ERR(q->event_cq)) {
-			pr_err("ib_create_cq failed");
-		}
-
-		ret = ib_req_notify_cq(q->event_cq, IB_CQ_NEXT_COMP);
-		if (ret) {
-			pr_err("ib_req_notify_cq failed");
-		}
-
-		init_attr.send_cq = q->event_cq;
-		init_attr.recv_cq = q->event_cq;
-	}
+	init_attr.send_cq = q->send_cq; 
+	init_attr.recv_cq = q->recv_cq;
 
 	/* just to check if we are compiling against the right headers */
 	//init_attr.create_flags = IB_QP_EXP_CREATE_ATOMIC_BE_REPLY & 0;
@@ -584,8 +273,6 @@ static int dcc_rdma_create_qp(struct rdma_queue *q)
 
 static void dcc_rdma_destroy_queue_ib(struct rdma_queue *q)
 {
-	if (!(q->id < rdma_config.num_data_qps))
-		ib_free_cq(q->event_cq);
 	//rdma_destroy_qp(q->ctrl->cm_id);
 }
 
@@ -732,7 +419,6 @@ static int __dcc_rdma_init_queue(struct dcc_rdma_ctrl *ctrl, int idx)
 
 	queue->id = idx;
 	spin_lock_init(&queue->lock);
-	mutex_init(&queue->mtx);
 
 	queue->ctrl = ctrl;
 
@@ -812,7 +498,7 @@ static struct dcc_rdma_ctrl *dcc_rdma_alloc_control(int id)
 		goto out_free_queues;
 	}
 	
-	ctrl->ht = hashtable_init(128);
+	ctrl->ht = hashtable_init(1024*1024);
 	if (!ctrl->ht) {
 		goto out_free_mm;	
 	}
@@ -878,19 +564,9 @@ static struct ib_client dcc_rdma_ib_client = {
 
 void dcc_rdma_set_default_config(void) 
 {
-	rdma_config.num_get_qps = 6;
-	rdma_config.num_data_qps = 2 + rdma_config.num_get_qps;
-	rdma_config.num_filter_qps = 1;
-	rdma_config.num_qps = rdma_config.num_data_qps + 
-		rdma_config.num_filter_qps;
-	rdma_config.num_msgs = 512;	// 1 MB
-	rdma_config.num_put_batch = 32; // 128 KB
-	rdma_config.get_metadata_size = sizeof(uint64_t) * 2;
-	rdma_config.inv_metadata_size = sizeof(uint64_t) * rdma_config.num_msgs;
-	rdma_config.metadata_size = rdma_config.get_metadata_size + 
-		rdma_config.inv_metadata_size;
-	rdma_config.metadata_mr_size = rdma_config.num_data_qps * 
-		rdma_config.metadata_size;
+	rdma_config.num_data_qps = num_online_cpus() - 1;
+	rdma_config.num_qps = rdma_config.num_data_qps;
+	rdma_config.num_msgs = 512;
 }
 
 int dcc_rdma_init(void) 
@@ -940,33 +616,12 @@ int dcc_rdma_init(void)
 			goto out_free_queues;
 		}
 		
-		ret = rdma_mem_register_region(ctrl);
-		if (ret) {
-			pr_err("could not register mr");
-			ret = -ENOMEM;
-			goto out_free_queues;
-		}
-
 		ret = dcc_rdma_recv_remotemr(ctrl);
 		if (ret) {
 			/* TODO: allocation failed handle */
 			pr_err("could not setup remote memory region");
 			return -ENOMEM;
 		}
-		
-		ret = rdma_mem_alloc_region(ctrl);
-		if (ret) {
-			pr_err("could not allocate filter mem pool");
-			return -ENOMEM;
-		}
-
-		ret = dcc_rdma_send_localmr(ctrl);
-		if (unlikely(ret)) {
-			pr_err("could not send local memory region");
-			return -ENODEV;
-		}
-
-		pre_post_recvs(ctrl);
 
 		ret = dcc_backend_init(i, ctrl);
 		if (ret) {
@@ -1005,8 +660,6 @@ void dcc_rdma_exit(struct dcc_rdma_ctrl *ctrl, bool last_flag)
 	
 	hashtable_exit(ctrl->ht);
 
-	rdma_mem_free_region(ctrl);
-	
 	dcc_rdma_free_control(ctrl);
 	
 	if (last_flag) {

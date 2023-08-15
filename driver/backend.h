@@ -1,24 +1,20 @@
 #ifndef __BACKEND_H__
 #define __BACKEND_H__
 
-#include "rdma.h"
-#include "metadata.h"
-#include "access_filter.h"
-#include "worker.h"
 #include "config.h"
+#include "rdma.h"
+#include "rmem_pool.h"
+#include "rmem_cache.h"
+#include "access_filter.h"
 
 struct dcc_backend {
 	int id;
 
 	struct dcc_rdma_ctrl *ctrl;
 	
-	metadata_t *meta;
+	rmem_pool_t *pool;
+	rmem_cache_t *cache;
 	access_filter_t *af;
-	
-	struct dcc_worker *worker[2];
-	struct dcc_worker_arg worker_arg[2]; // share the arg
-
-	unsigned long remote_enabled;
 };
 
 /* longkey: 64bit = 4(cid) + 32(ino) + 28(page offset: enough file size) */
@@ -48,7 +44,6 @@ static inline u32 longkey_to_offset(u64 longkey)
         return longkey & ((1 << (28 + 1)) - 1);
 }
 
-extern struct dcc_config_t config;
 static inline int get_backend_id(ino_t ino, pgoff_t index) 
 {
 	u64 key;
@@ -68,7 +63,8 @@ extern struct dcc_backend **backends;
 	struct dcc_backend *backend = backends[be_id];		\
 	int cli_id = backend->ctrl->mm->server_mm_info.cli_id; 	\
 	u64 key = make_longkey(cli_id, ino, index); 		\
-	struct metadata_t *meta = backend->meta; 		\
+	struct rmem_pool_t *pool = backend->pool; 		\
+	struct rmem_cache_t *cache = backend->cache; 		\
 	struct dcc_rdma_ctrl *ctrl = backend->ctrl; 		\
 
 
